@@ -10,34 +10,74 @@ function getPid() {
   return pid;
 }
 
+const PHASE_TITLES = {
+  discuss: "Discussion",
+  vote: "Voting",
+  results: "Results",
+};
+
 export default function App() {
-  const [view, setView] = useState({ type: "connecting" });
+  const [status, setStatus] = useState("connecting"); // connecting | waiting | running | closed
+  const [info, setInfo] = useState(null);             // { you, players }
+  const [phase, setPhase] = useState(null);           // last state_changed message
+  const [endsAt, setEndsAt] = useState(0);            // local time when the phase ends
+  const [now, setNow] = useState(Date.now());
+  const [lastMsg, setLastMsg] = useState(null);
 
   useEffect(() => {
     const protocol = window.location.protocol === "https:" ? "wss" : "ws";
     const ws = new WebSocket(
       `${protocol}://${window.location.host}/ws/session?pid=${getPid()}`
     );
-    ws.onmessage = (e) => setView(JSON.parse(e.data));
-    ws.onclose = () => setView((v) => ({ ...v, closed: true }));
+    ws.onmessage = (e) => {
+      const msg = JSON.parse(e.data);
+      setLastMsg(msg);
+      if (msg.type === "waiting") setStatus("waiting");
+      if (msg.type === "session_started") {
+        setInfo({ you: msg.you, players: msg.players });
+        setStatus("running");
+      }
+      if (msg.type === "state_changed") {
+        setPhase(msg);
+        setEndsAt(Date.now() + msg.seconds_left * 1000);
+      }
+    };
+    ws.onclose = () => setStatus("closed");
     return () => ws.close();
   }, []);
+
+  // Tick every 250 ms so the countdown stays smooth
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 250);
+    return () => clearInterval(t);
+  }, []);
+
+  const secondsLeft = Math.max(0, Math.ceil((endsAt - now) / 1000));
 
   return (
     <div style={{ fontFamily: "sans-serif", padding: 24 }}>
       <h1>Group Decision Experiment</h1>
-      {view.type === "connecting" && <p>Connecting...</p>}
-      {view.type === "waiting" && <p>Waiting for other participants...</p>}
-      {view.type === "session_started" && (
+      {status === "connecting" && <p>Connecting...</p>}
+      {status === "waiting" && <p>Waiting for other participants...</p>}
+      {status === "running" && info && (
         <div>
-          <p>Session started. You are <b>{view.you}</b>.</p>
-          <p>Participants: {view.players.join(", ")}</p>
+          <p>You are <b>{info.you}</b>. Participants: {info.players.join(", ")}</p>
+          {phase && (
+            <div>
+              <h2>
+                {PHASE_TITLES[phase.phase]}
+                {phase.round ? ` (round ${phase.round})` : ""}
+              </h2>
+              {phase.phase !== "results" && <p>Time left: {secondsLeft}s</p>}
+              {phase.phase === "results" && <p>The experiment is finished.</p>}
+            </div>
+          )}
         </div>
       )}
-      {view.closed && <p style={{ color: "crimson" }}>Connection closed.</p>}
+      {status === "closed" && <p style={{ color: "crimson" }}>Connection closed.</p>}
       <details style={{ marginTop: 24 }}>
-        <summary>Raw message (debug)</summary>
-        <pre>{JSON.stringify(view, null, 2)}</pre>
+        <summary>Last message (debug)</summary>
+        <pre>{JSON.stringify(lastMsg, null, 2)}</pre>
       </details>
     </div>
   );
