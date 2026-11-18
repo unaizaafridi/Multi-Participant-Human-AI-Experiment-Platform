@@ -25,6 +25,9 @@ class Session:
         self.round: int | None = None
         self.phase_ends_at: float = 0.0      # event-loop time when the phase ends
         self.messages: list[dict] = []       # public chat history (labels only)
+        self.votes: dict[int, dict[str, str]] = {}   # round -> {voter label: target label}
+        self.round_feedback: list[dict] = []         # round_result messages already sent
+        self.result: dict | None = None              # final result, set after the last vote
         self.created_at = datetime.now(timezone.utc)
         labels = LABELS[:]
         random.shuffle(labels)
@@ -114,12 +117,14 @@ class SessionManager:
             if not entry or not isinstance(data, dict):
                 return
             session, p = entry
-            if data.get("type") == "chat":
+            kind = data.get("type")
+            if kind == "chat":
                 await self._post_message(session, p, data.get("text"))
-            # "vote" is handled from Step 7
+            elif kind == "vote":
+                await self._cast_vote(session, p, data.get("target"))
 
     async def _post_message(self, session: Session, p: Participant, text):
-        """Shared by humans (now) and AI agents (Step 8)."""
+        """Shared by humans and AI agents (Step 8)."""
         if session.phase != "discuss":
             return
         if not isinstance(text, str):
@@ -139,6 +144,57 @@ class SessionManager:
             "created_at": datetime.now(timezone.utc),
         })
         await self._broadcast(session, public)
+
+    async def _cast_vote(self, session: Session, p: Participant, target):
+        """Shared by humans and AI agents (Step 8). The last vote in a round counts."""
+        if session.phase != "vote":
+            return
+        if not isinstance(target, str) or target not in session.labels():
+            return
+        session.votes.setdefault(session.round, {})[p.label] = target
+        await self.db.votes.update_one(
+            {"session_id": session.id, "round": session.round, "voter": p.label},
+            {"$set": {
+                "voter_type": p.type,   # internal only, never sent to clients
+                "target": target,
+                "updated_at": datetime.now(timezone.utc),
+            }},
+            upsert=True,
+        )
+        await self._send_json(p, {"type": "vote_ack", "round": session.round, "target": target})
+
+    # ---- counting ----
+
+    def _tally(self, session: Session, rnd: int) -> dict[str, int]:
+        tally = {label: 0 for label in session.labels()}
+        for target in session.votes.get(rnd, {}).values():
+            tally[target] += 1
+        return tally
+
+    def _decide(self, session: Session, tally: dict[str, int]) -> dict:
+        top = max(tally.values())
+        candidates = [label for label, count in tally.items() if count == top]
+        tie = len(candidates) > 1
+
+        if tie and self.config["results"]["tie_break"] == "round1":
+            r1 = self._tally(session, 1)
+            best = max(r1[label] for label in candidates)
+            candidates = [label for label in candidates if r1[label] == best]
+
+        winner = random.choice(candidates)  # only random if still tied
+        return {"winner": winner, "tally": tally, "tie_broken": tie}
+
+    async def _finish_round(self, session: Session, rnd: int):
+        tally = self._tally(session, rnd)
+        if rnd == self.config["session"]["rounds"]:
+            session.result = self._decide(session, tally)
+            await self.db.sessions.update_one(
+                {"_id": session.id}, {"$set": {"result": session.result}}
+            )
+        elif self.config["results"]["round1_feedback"] == "tally":
+            msg = {"type": "round_result", "round": rnd, "tally": tally}
+            session.round_feedback.append(msg)
+            await self._broadcast(session, msg)
 
     # ---- state machine ----
 
@@ -167,8 +223,12 @@ class SessionManager:
             session.phase_ends_at = loop.time() + duration
             await self.db.sessions.update_one({"_id": session.id}, {"$set": {"state": state}})
             await self._broadcast(session, self._phase_msg(session))
+            if phase == "results" and session.result:
+                await self._broadcast(session, self._results_msg(session))
             if duration:
                 await asyncio.sleep(duration)
+            if phase == "vote":
+                await self._finish_round(session, rnd)
 
     # ---- messaging ----
 
@@ -184,6 +244,9 @@ class SessionManager:
             "round": session.round,
             "seconds_left": session.seconds_left(),
         }
+
+    def _results_msg(self, session: Session) -> dict:
+        return {"type": "results", **session.result}
 
     async def _send_json(self, p: Participant, msg: dict):
         if p.ws is None:
@@ -204,3 +267,13 @@ class SessionManager:
         await self._send_json(p, self._started_msg(session, p))
         await self._send_json(p, self._phase_msg(session))
         await self._send_json(p, {"type": "history", "messages": session.messages})
+        for msg in session.round_feedback:
+            await self._send_json(p, msg)
+        if session.phase == "vote":
+            current = session.votes.get(session.round, {}).get(p.label)
+            if current:
+                await self._send_json(
+                    p, {"type": "vote_ack", "round": session.round, "target": current}
+                )
+        if session.phase == "results" and session.result:
+            await self._send_json(p, self._results_msg(session))

@@ -16,6 +16,18 @@ const PHASE_TITLES = {
   results: "Results",
 };
 
+function Tally({ tally }) {
+  return (
+    <ul>
+      {Object.entries(tally).map(([label, count]) => (
+        <li key={label}>
+          {label}: {count} vote{count === 1 ? "" : "s"}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
 export default function App() {
   const [status, setStatus] = useState("connecting"); // connecting | waiting | running | closed
   const [info, setInfo] = useState(null);             // { you, players }
@@ -24,6 +36,9 @@ export default function App() {
   const [now, setNow] = useState(Date.now());
   const [messages, setMessages] = useState([]);
   const [draft, setDraft] = useState("");
+  const [myVote, setMyVote] = useState(null);         // { round, target }
+  const [roundResults, setRoundResults] = useState([]);
+  const [result, setResult] = useState(null);
   const [lastMsg, setLastMsg] = useState(null);
   const wsRef = useRef(null);
   const chatEndRef = useRef(null);
@@ -48,6 +63,12 @@ export default function App() {
       }
       if (msg.type === "history") setMessages(msg.messages);
       if (msg.type === "message") setMessages((prev) => [...prev, msg]);
+      if (msg.type === "vote_ack") setMyVote({ round: msg.round, target: msg.target });
+      if (msg.type === "round_result") {
+        // replace if the same round arrives again after a reconnect
+        setRoundResults((prev) => [...prev.filter((r) => r.round !== msg.round), msg]);
+      }
+      if (msg.type === "results") setResult(msg);
     };
     ws.onclose = () => setStatus("closed");
     return () => ws.close();
@@ -66,6 +87,8 @@ export default function App() {
 
   const secondsLeft = Math.max(0, Math.ceil((endsAt - now) / 1000));
   const canChat = status === "running" && phase?.phase === "discuss";
+  const canVote = status === "running" && phase?.phase === "vote";
+  const currentVote = myVote && myVote.round === phase?.round ? myVote.target : null;
 
   function send(e) {
     e.preventDefault();
@@ -73,6 +96,11 @@ export default function App() {
     if (!text || !canChat) return;
     wsRef.current.send(JSON.stringify({ type: "chat", text }));
     setDraft("");
+  }
+
+  function vote(target) {
+    if (!canVote) return;
+    wsRef.current.send(JSON.stringify({ type: "vote", target }));
   }
 
   return (
@@ -83,6 +111,7 @@ export default function App() {
       {status === "running" && info && (
         <div>
           <p>You are <b>{info.you}</b>. Participants: {info.players.join(", ")}</p>
+
           {phase && (
             <div>
               <h2>
@@ -90,7 +119,53 @@ export default function App() {
                 {phase.round ? ` (round ${phase.round})` : ""}
               </h2>
               {phase.phase !== "results" && <p>Time left: {secondsLeft}s</p>}
-              {phase.phase === "results" && <p>The experiment is finished.</p>}
+            </div>
+          )}
+
+          {roundResults.map((r) => (
+            <div key={r.round} style={{ background: "#f4f4f4", padding: 8, marginBottom: 8 }}>
+              <b>Round {r.round} vote counts</b>
+              <Tally tally={r.tally} />
+            </div>
+          ))}
+
+          {canVote && (
+            <div style={{ marginBottom: 12 }}>
+              <p>Who should be the Decision Maker?</p>
+              {info.players.map((label) => (
+                <button
+                  key={label}
+                  onClick={() => vote(label)}
+                  style={{
+                    marginRight: 8,
+                    padding: "6px 12px",
+                    fontWeight: currentVote === label ? "bold" : "normal",
+                    border: currentVote === label ? "2px solid #2563eb" : "1px solid #888",
+                  }}
+                >
+                  {label}
+                  {label === info.you ? " (you)" : ""}
+                </button>
+              ))}
+              <p style={{ color: "#555" }}>
+                {currentVote
+                  ? `Your vote: ${currentVote}. You can change it until time runs out.`
+                  : "You have not voted yet."}
+              </p>
+            </div>
+          )}
+
+          {phase?.phase === "results" && (
+            <div style={{ border: "2px solid #16a34a", borderRadius: 6, padding: 12, marginBottom: 12 }}>
+              {result ? (
+                <>
+                  <h2 style={{ marginTop: 0 }}>Decision Maker: {result.winner}</h2>
+                  <Tally tally={result.tally} />
+                  {result.tie_broken && <p style={{ color: "#555" }}>The vote was tied and the tie was broken.</p>}
+                </>
+              ) : (
+                <p>The experiment is finished.</p>
+              )}
             </div>
           )}
 
