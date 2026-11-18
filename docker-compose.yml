@@ -17,5 +17,14 @@ services:
     depends_on:
       - mongo
 
+  frontend:
+    build: ./frontend
+    volumes:
+      - ./frontend/src:/app/src
+    ports:
+      - "5173:5173"
+    depends_on:
+      - backend
+
 volumes:
   mongo_data:

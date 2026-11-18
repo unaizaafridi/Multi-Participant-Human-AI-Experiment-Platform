@@ -1,7 +1,7 @@
 import os
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from pymongo import AsyncMongoClient
 
 from .config import load_config
@@ -29,3 +29,15 @@ async def health():
         "human_slots": participants.count("human"),
         "ai_slots": participants.count("ai"),
     }
+
+
+# Temporary test endpoint: removed once the real session WebSocket exists.
+@app.websocket("/ws/echo")
+async def ws_echo(websocket: WebSocket):
+    await websocket.accept()
+    try:
+        while True:
+            text = await websocket.receive_text()
+            await websocket.send_text(f"echo: {text}")
+    except WebSocketDisconnect:
+        pass
