@@ -1,14 +1,22 @@
 session:
-  # Pick one condition by editing this list:
+  # Pick ONE condition by editing this list:
   #   [human, human, human]  -> 3 humans
   #   [human, human, ai]     -> 2 humans + 1 AI
   #   [human, ai, ai]        -> 1 human + 2 AIs
   participants: [human, human, ai]
-  discussion_seconds: 60
-  vote_seconds: 20
   rounds: 2
+  discussion_seconds: 40
+  vote_seconds: 20
+
+results:
+  round1_feedback: none   # none | tally  (what players see after round 1 voting)
+  tie_break: random       # random | round1  (how a tie in the final vote is resolved)
 
 ai:
-  provider: scripted   # "scripted" (no API key needed) or "llm"
-  min_delay_seconds: 2
-  max_delay_seconds: 6
+  provider: llm            # llm | scripted
+  base_url: https://generativelanguage.googleapis.com/v1beta/openai/
+  model: gemini-flash-lite-latest
+  api_key_env: GEMINI_API_KEY
+  timeout_seconds: 10
+  min_delay_seconds: 5     # slower replies also save free-tier quota
+  max_delay_seconds: 9
