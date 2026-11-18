@@ -1,0 +1,21 @@
+services:
+  mongo:
+    image: mongo:7
+    volumes:
+      - mongo_data:/data/db
+
+  backend:
+    build: ./backend
+    environment:
+      MONGO_URL: mongodb://mongo:27017
+      CONFIG_PATH: /config/config.yml
+    volumes:
+      - ./backend/app:/app/app
+      - ./config.yml:/config/config.yml:ro
+    ports:
+      - "8000:8000"
+    depends_on:
+      - mongo
+
+volumes:
+  mongo_data:
