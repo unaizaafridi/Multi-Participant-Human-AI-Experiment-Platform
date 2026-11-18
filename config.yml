@@ -1,0 +1,14 @@
+session:
+  # Pick one condition by editing this list:
+  #   [human, human, human]  -> 3 humans
+  #   [human, human, ai]     -> 2 humans + 1 AI
+  #   [human, ai, ai]        -> 1 human + 2 AIs
+  participants: [human, human, ai]
+  discussion_seconds: 60
+  vote_seconds: 20
+  rounds: 2
+
+ai:
+  provider: scripted   # "scripted" (no API key needed) or "llm"
+  min_delay_seconds: 2
+  max_delay_seconds: 6
