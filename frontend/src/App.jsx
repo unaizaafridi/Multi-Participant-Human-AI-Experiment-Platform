@@ -1,41 +1,44 @@
 import { useEffect, useState } from "react";
 
+function getPid() {
+  // sessionStorage = one id per browser tab, so several tabs act as several players
+  let pid = sessionStorage.getItem("pid");
+  if (!pid) {
+    pid = crypto.randomUUID();
+    sessionStorage.setItem("pid", pid);
+  }
+  return pid;
+}
+
 export default function App() {
-  const [health, setHealth] = useState(null);
-  const [error, setError] = useState(null);
-  const [wsLog, setWsLog] = useState([]);
+  const [view, setView] = useState({ type: "connecting" });
 
   useEffect(() => {
-    fetch("/api/health")
-      .then((r) => r.json())
-      .then(setHealth)
-      .catch((e) => setError(String(e)));
-
     const protocol = window.location.protocol === "https:" ? "wss" : "ws";
-    const ws = new WebSocket(`${protocol}://${window.location.host}/ws/echo`);
-    const log = (line) => setWsLog((prev) => [...prev, line]);
-
-    ws.onopen = () => {
-      log("connected");
-      ws.send("hello from React");
-    };
-    ws.onmessage = (e) => log(`server says: ${e.data}`);
-    ws.onerror = () => log("error");
-    ws.onclose = () => log("closed");
-
+    const ws = new WebSocket(
+      `${protocol}://${window.location.host}/ws/session?pid=${getPid()}`
+    );
+    ws.onmessage = (e) => setView(JSON.parse(e.data));
+    ws.onclose = () => setView((v) => ({ ...v, closed: true }));
     return () => ws.close();
   }, []);
 
   return (
     <div style={{ fontFamily: "sans-serif", padding: 24 }}>
       <h1>Group Decision Experiment</h1>
-
-      <h3>Backend health</h3>
-      {error && <p style={{ color: "crimson" }}>Error: {error}</p>}
-      {health ? <pre>{JSON.stringify(health, null, 2)}</pre> : <p>Loading...</p>}
-
-      <h3>WebSocket test</h3>
-      <pre>{wsLog.join("\n")}</pre>
+      {view.type === "connecting" && <p>Connecting...</p>}
+      {view.type === "waiting" && <p>Waiting for other participants...</p>}
+      {view.type === "session_started" && (
+        <div>
+          <p>Session started. You are <b>{view.you}</b>.</p>
+          <p>Participants: {view.players.join(", ")}</p>
+        </div>
+      )}
+      {view.closed && <p style={{ color: "crimson" }}>Connection closed.</p>}
+      <details style={{ marginTop: 24 }}>
+        <summary>Raw message (debug)</summary>
+        <pre>{JSON.stringify(view, null, 2)}</pre>
+      </details>
     </div>
   );
 }
