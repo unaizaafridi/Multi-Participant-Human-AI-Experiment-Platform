@@ -1,9 +1,14 @@
 import asyncio
+import logging
 import random
 import uuid
 from datetime import datetime, timezone
 
 from fastapi import WebSocket
+
+from .agents import make_provider
+
+log = logging.getLogger("session")
 
 LABELS = ["Player A", "Player B", "Player C"]
 MAX_MESSAGE_LENGTH = 300
@@ -15,13 +20,14 @@ class Participant:
         self.type = ptype      # "human" | "ai" (internal only, never sent to clients)
         self.pid: str | None = None
         self.ws: WebSocket | None = None
+        self.provider = None   # AI behaviour, only set for ai participants
 
 
 class Session:
     def __init__(self, participant_types: list[str]):
         self.id = uuid.uuid4().hex[:8]
         self.state = "WAITING"
-        self.phase: str | None = None        # "discuss" | "vote" | "results"
+        self.phase: str | None = None        # "discuss" | "vote" | "closing" | "results"
         self.round: int | None = None
         self.phase_ends_at: float = 0.0      # event-loop time when the phase ends
         self.messages: list[dict] = []       # public chat history (labels only)
@@ -69,6 +75,11 @@ class SessionManager:
         self.by_pid: dict[str, tuple[Session, Participant]] = {}
         self.lock = asyncio.Lock()
         self.tasks: set[asyncio.Task] = set()
+
+    def _spawn(self, coro):
+        task = asyncio.create_task(coro)
+        self.tasks.add(task)  # keep a reference so the task isn't garbage collected
+        task.add_done_callback(self.tasks.discard)
 
     # ---- connection lifecycle ----
 
@@ -124,7 +135,7 @@ class SessionManager:
                 await self._cast_vote(session, p, data.get("target"))
 
     async def _post_message(self, session: Session, p: Participant, text):
-        """Shared by humans and AI agents (Step 8)."""
+        """Shared by humans and AI agents."""
         if session.phase != "discuss":
             return
         if not isinstance(text, str):
@@ -146,7 +157,7 @@ class SessionManager:
         await self._broadcast(session, public)
 
     async def _cast_vote(self, session: Session, p: Participant, target):
-        """Shared by humans and AI agents (Step 8). The last vote in a round counts."""
+        """Shared by humans and AI agents. The last vote in a round counts."""
         if session.phase != "vote":
             return
         if not isinstance(target, str) or target not in session.labels():
@@ -162,6 +173,48 @@ class SessionManager:
             upsert=True,
         )
         await self._send_json(p, {"type": "vote_ack", "round": session.round, "target": target})
+
+    # ---- AI agents ----
+
+    def _agent_context(self, session: Session, p: Participant) -> dict:
+        """Only public information, the same a human player can see."""
+        return {
+            "you": p.label,
+            "players": session.labels(),
+            "round": session.round,
+            "messages": list(session.messages),
+            "round1_tally": self._tally(session, 1) if (session.round or 0) > 1 else None,
+        }
+
+    async def _agent_phase(self, session: Session, p: Participant, state: str):
+        """Runs one AI agent for one phase. Ends when the phase changes."""
+        ai = self.config["ai"]
+        try:
+            if state.endswith("_DISCUSS"):
+                while session.state == state:
+                    await asyncio.sleep(
+                        random.uniform(ai["min_delay_seconds"], ai["max_delay_seconds"])
+                    )
+                    if session.state != state:
+                        return
+                    text = await p.provider.generate_message(self._agent_context(session, p))
+                    if not text:
+                        continue
+                    await asyncio.sleep(min(3.0, len(text) * 0.05))  # "typing" time
+                    if session.state != state:
+                        return
+                    async with self.lock:
+                        await self._post_message(session, p, text)
+            elif state.endswith("_VOTE"):
+                left = session.seconds_left()
+                await asyncio.sleep(random.uniform(min(2, left * 0.3), max(0.5, left * 0.7)))
+                if session.state != state:
+                    return
+                target = await p.provider.decide_vote(self._agent_context(session, p))
+                async with self.lock:
+                    await self._cast_vote(session, p, target)
+        except Exception:
+            log.exception("AI agent %s failed in %s", p.label, state)
 
     # ---- counting ----
 
@@ -209,12 +262,13 @@ class SessionManager:
         return phases
 
     async def _start(self, session: Session):
+        for p in session.participants:
+            if p.type == "ai":
+                p.provider = make_provider(self.config)
         await self.db.sessions.insert_one(session.to_doc())
         for p in session.humans():
             await self._send_json(p, self._started_msg(session, p))
-        task = asyncio.create_task(self._run(session))
-        self.tasks.add(task)  # keep a reference so the task isn't garbage collected
-        task.add_done_callback(self.tasks.discard)
+        self._spawn(self._run(session))
 
     async def _run(self, session: Session):
         loop = asyncio.get_running_loop()
@@ -225,10 +279,16 @@ class SessionManager:
             await self._broadcast(session, self._phase_msg(session))
             if phase == "results" and session.result:
                 await self._broadcast(session, self._results_msg(session))
+            if phase in ("discuss", "vote"):
+                for p in session.participants:
+                    if p.type == "ai":
+                        self._spawn(self._agent_phase(session, p, state))
             if duration:
                 await asyncio.sleep(duration)
-            if phase == "vote":
-                await self._finish_round(session, rnd)
+                async with self.lock:
+                    session.phase = "closing"  # no more chat or votes accepted
+                    if phase == "vote":
+                        await self._finish_round(session, rnd)
 
     # ---- messaging ----
 
