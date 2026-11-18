@@ -1,3 +1,4 @@
+import json
 import os
 from contextlib import asynccontextmanager
 
@@ -39,7 +40,12 @@ async def ws_session(websocket: WebSocket, pid: str):
     await manager.connect(pid, websocket)
     try:
         while True:
-            await websocket.receive_text()  # client messages handled from Step 6
+            raw = await websocket.receive_text()
+            try:
+                data = json.loads(raw)
+            except json.JSONDecodeError:
+                continue  # ignore malformed messages
+            await manager.handle(pid, data)
     except WebSocketDisconnect:
         pass
     finally:

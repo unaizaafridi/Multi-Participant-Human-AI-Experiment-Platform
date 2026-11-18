@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from fastapi import WebSocket
 
 LABELS = ["Player A", "Player B", "Player C"]
+MAX_MESSAGE_LENGTH = 300
 
 
 class Participant:
@@ -23,6 +24,7 @@ class Session:
         self.phase: str | None = None        # "discuss" | "vote" | "results"
         self.round: int | None = None
         self.phase_ends_at: float = 0.0      # event-loop time when the phase ends
+        self.messages: list[dict] = []       # public chat history (labels only)
         self.created_at = datetime.now(timezone.utc)
         labels = LABELS[:]
         random.shuffle(labels)
@@ -104,6 +106,40 @@ class SessionManager:
                 p.pid = None
                 del self.by_pid[pid]
 
+    # ---- incoming client messages ----
+
+    async def handle(self, pid: str, data: dict):
+        async with self.lock:
+            entry = self.by_pid.get(pid)
+            if not entry or not isinstance(data, dict):
+                return
+            session, p = entry
+            if data.get("type") == "chat":
+                await self._post_message(session, p, data.get("text"))
+            # "vote" is handled from Step 7
+
+    async def _post_message(self, session: Session, p: Participant, text):
+        """Shared by humans (now) and AI agents (Step 8)."""
+        if session.phase != "discuss":
+            return
+        if not isinstance(text, str):
+            return
+        text = text.strip()[:MAX_MESSAGE_LENGTH]
+        if not text:
+            return
+
+        public = {"type": "message", "from": p.label, "text": text, "round": session.round}
+        session.messages.append(public)
+        await self.db.messages.insert_one({
+            "session_id": session.id,
+            "round": session.round,
+            "label": p.label,
+            "sender_type": p.type,   # internal only, never sent to clients
+            "text": text,
+            "created_at": datetime.now(timezone.utc),
+        })
+        await self._broadcast(session, public)
+
     # ---- state machine ----
 
     def _build_phases(self) -> list[tuple[str, int | None, str, int]]:
@@ -167,3 +203,4 @@ class SessionManager:
             return
         await self._send_json(p, self._started_msg(session, p))
         await self._send_json(p, self._phase_msg(session))
+        await self._send_json(p, {"type": "history", "messages": session.messages})
